@@ -11,35 +11,9 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"tencent.com/justynyin/scheduler/common"
 	"time"
 )
-
-type job struct {
-	// 任务id
-	Id int `json:"id"`
-	// 任务名
-	Name string `json:"name"`
-	// 任务执行命令
-	Cmd string `json:"cmd"`
-	// cron表达式
-	Cron string `json:"cron"`
-	// 执行机
-	ExecuteServers []string `json:"executeServers"`
-	// 调度类型：1 - 全量调度，2 - 单机调度
-	ScheduleType int `json:"scheduleType"`
-	// 下次执行时间
-	NextExecuteTime int64 `json:"nextExecuteTime"`
-	// 上次执行时间
-	LastExecuteTime string `json:"lastExecuteTime"`
-	// 上次执行状态
-	LastExecuteStatus string `json:"lastExecuteStatus"`
-	// 上次执行机器ip
-	LastExecuteServers []string `json:"lastExecuteServers"`
-	// 状态：0 - 冻结，1 - 正常, 2 - 已调度，3 - 执行中
-	Status int `json:"status"`
-	// 创建/修改时间
-	ModifyTime time.Time `json:"modifyTime"`
-}
 
 func main() {
 	// help
@@ -223,7 +197,7 @@ func addJob(client *clientv3.Client, jobName string, cmd string, cron string, ex
 		fmt.Printf("parse cron expression error:%v\n", err)
 		os.Exit(1)
 	}
-	job := job{
+	job := common.Job{
 		Id:                 id,
 		Name:               jobName,
 		Cmd:                cmd,
@@ -282,7 +256,7 @@ func generateJobId(client *clientv3.Client) (int, error) {
 
 // 查询job
 func showJob(client *clientv3.Client, jobName string, jobId int) {
-	var result []job
+	var result []common.Job
 	if -1 != jobId {
 		kv := clientv3.NewKV(client)
 		// 获取job name
@@ -312,7 +286,7 @@ func showJob(client *clientv3.Client, jobName string, jobId int) {
 			fmt.Println("not find jobs")
 			os.Exit(1)
 		}
-		job := job{}
+		job := common.Job{}
 		err = json.Unmarshal(resp.Kvs[0].Value, &job)
 		if err != nil {
 			fmt.Printf("get job error:%v\n", err)
@@ -331,7 +305,7 @@ func showJob(client *clientv3.Client, jobName string, jobId int) {
 			os.Exit(0)
 		}
 		for _, value := range resp.Kvs {
-			job := job{}
+			job := common.Job{}
 			err := json.Unmarshal(value.Value, &job)
 			if err != nil {
 				fmt.Printf("get job error:%v\n", err)
@@ -427,7 +401,7 @@ func updateJob(client *clientv3.Client, jobId int, cmd string, cron string,
 		fmt.Println("not find jobs")
 		os.Exit(1)
 	}
-	job := job{}
+	job := common.Job{}
 	err = json.Unmarshal(resp.Kvs[0].Value, &job)
 	if err != nil {
 		fmt.Printf("parse job data error:%v\n", err)
@@ -503,7 +477,7 @@ func changeJobStatus(client *clientv3.Client, jobId int, status int) {
 		fmt.Println("not find jobs")
 		os.Exit(1)
 	}
-	job := job{}
+	job := common.Job{}
 	err = json.Unmarshal(resp.Kvs[0].Value, &job)
 	if err != nil {
 		fmt.Printf("parse job data error:%v\n", err)

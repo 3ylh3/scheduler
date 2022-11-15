@@ -7,38 +7,12 @@ import (
 	"fmt"
 	"github.com/coreos/etcd/clientv3"
 	"github.com/coreos/etcd/clientv3/concurrency"
+	"github.com/gorhill/cronexpr"
 	"math/rand"
 	"os"
-	"sync"
+	"tencent.com/justynyin/scheduler/common"
 	"time"
 )
-
-type job struct {
-	// 任务id
-	Id int `json:"id"`
-	// 任务名
-	Name string `json:"name"`
-	// 任务执行命令
-	Cmd string `json:"cmd"`
-	// cron表达式
-	Cron string `json:"cron"`
-	// 执行机
-	ExecuteServers []string `json:"executeServers"`
-	// 调度类型：1 - 全量调度，2 - 单机调度
-	ScheduleType int `json:"scheduleType"`
-	// 下次执行时间
-	NextExecuteTime int64 `json:"nextExecuteTime"`
-	// 上次执行时间
-	LastExecuteTime string `json:"lastExecuteTime"`
-	// 上次执行状态
-	LastExecuteStatus string `json:"lastExecuteStatus"`
-	// 上次执行机器ip
-	LastExecuteServers []string `json:"lastExecuteServers"`
-	// 状态：0 - 冻结，1 - 正常, 2 - 已调度，3 - 执行中
-	Status int `json:"status"`
-	// 创建/修改时间
-	ModifyTime time.Time `json:"modifyTime"`
-}
 
 func main() {
 	// etcd地址
@@ -72,29 +46,35 @@ func main() {
 			continue
 		}
 		// 循环检查每一个job
-		var wg sync.WaitGroup
 		for _, value := range resp.Kvs {
-			wg.Add(1)
-			go processJob(value.Value, client, kv, &wg)
+			go processJob(value.Value, client, kv)
 		}
-		wg.Wait()
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-func processJob(bytes []byte, client *clientv3.Client, kv clientv3.KV, wg *sync.WaitGroup) {
-	defer wg.Done()
-	job := job{}
+func processJob(bytes []byte, client *clientv3.Client, kv clientv3.KV) {
+	job := common.Job{}
 	err := json.Unmarshal(bytes, &job)
 	if err != nil {
-		fmt.Printf("parse job error:%v\n", err)
 		return
 	}
 	if job.Status == 0 {
 		// 任务已冻结或者正在执行
 		return
 	}
+	// 加分布式锁
+	session, err := concurrency.NewSession(client, concurrency.WithTTL(1))
+	if err != nil {
+		fmt.Printf("lock error:%v\n", err)
+	}
+	defer session.Close()
+	lock := concurrency.NewLocker(session, "/jobs/"+job.Name)
+	lock.Lock()
+	defer lock.Unlock()
 	// 检查是否到达触发时间
-	if time.Now().Unix() >= job.NextExecuteTime {
+	if time.Now().Unix() == job.NextExecuteTime {
+		// 到达触发时间
 		if job.Status == 2 || job.Status == 3 {
 			// 任务正在执行
 			return
@@ -107,16 +87,8 @@ func processJob(bytes []byte, client *clientv3.Client, kv clientv3.KV, wg *sync.
 			rand.Seed(time.Now().UnixNano())
 			ips = append(ips, job.ExecuteServers[rand.Intn(len(job.ExecuteServers))])
 		}
-		// 加分布式锁
-		session, err := concurrency.NewSession(client, concurrency.WithTTL(1))
-		if err != nil {
-			fmt.Printf("lock error:%v\n", err)
-		}
-		defer session.Close()
-		lock := concurrency.NewLocker(session, "/jobs/"+job.Name)
-		lock.Lock()
-		defer lock.Unlock()
 		// 将任务信息放在执行ip节点下
+		var scheduledTime time.Time
 		for _, ip := range ips {
 			// 检查agent是否存在
 			rsp, err := kv.Get(context.TODO(), "/agents/"+ip, clientv3.WithPrefix())
@@ -129,7 +101,8 @@ func processJob(bytes []byte, client *clientv3.Client, kv clientv3.KV, wg *sync.
 				return
 			}
 			// 存入etcd
-			_, err = kv.Put(context.TODO(), "/agents/"+ip+"/jobs/"+job.Name, job.Cmd, clientv3.WithPrevKV())
+			scheduledTime = time.Now()
+			_, err = kv.Put(context.TODO(), "/agents/"+ip+"/jobs/"+job.Name, string(bytes), clientv3.WithPrevKV())
 			if err != nil {
 				fmt.Printf("%s:schedule error:%v,job name:%s\n", time.Now(), err, job.Name)
 				return
@@ -137,6 +110,16 @@ func processJob(bytes []byte, client *clientv3.Client, kv clientv3.KV, wg *sync.
 		}
 		// 更新任务状态为已调度
 		job.Status = 2
+		// 更新下次执行时间
+		expr, err := cronexpr.Parse(job.Cron)
+		if err != nil {
+			fmt.Printf("%s:parse cron expression error:%v,job name:%s\n", time.Now(), err, job.Name)
+		}
+		timestamp := expr.Next(time.Unix(job.NextExecuteTime, 0)).Unix()
+		if timestamp < time.Now().Unix() {
+			timestamp = expr.Next(time.Now()).Unix()
+		}
+		job.NextExecuteTime = timestamp
 		bytes, err := json.Marshal(job)
 		if err != nil {
 			fmt.Printf("parse job data error:%v\n", err)
@@ -149,6 +132,30 @@ func processJob(bytes []byte, client *clientv3.Client, kv clientv3.KV, wg *sync.
 			fmt.Printf("%s:update job status error:%v,job name:%s\n", time.Now(), err, job.Name)
 			return
 		}
-		fmt.Printf("%s:%s scheduled to %s\n", time.Now(), job.Name, ips)
+		fmt.Printf("%s:%s scheduled to %s\n", scheduledTime, job.Name, ips)
+	} else if time.Now().Unix() > job.NextExecuteTime {
+		if job.Status == 2 || job.Status == 3 {
+			// 任务正在执行
+			return
+		}
+		// 触发时间已过
+		// 更新下次执行时间
+		expr, err := cronexpr.Parse(job.Cron)
+		if err != nil {
+			fmt.Printf("%s:parse cron expression error:%v,job name:%s\n", time.Now(), err, job.Name)
+		}
+		job.NextExecuteTime = expr.Next(time.Now()).Unix()
+		bytes, err := json.Marshal(job)
+		if err != nil {
+			fmt.Printf("parse job data error:%v\n", err)
+			return
+		}
+		jobDetail := string(bytes)
+		// 更新etcd内容
+		_, err = kv.Put(context.TODO(), "/jobs/"+job.Name, jobDetail, clientv3.WithPrevKV())
+		if err != nil {
+			fmt.Printf("%s:update job status error:%v,job name:%s\n", time.Now(), err, job.Name)
+			return
+		}
 	}
 }
