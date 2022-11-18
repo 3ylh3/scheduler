@@ -69,7 +69,7 @@ func main() {
 	}
 	defer client.Close()
 	// 校验scheduleType
-	if -1 != scheduleType && 0 != scheduleType && 1 != scheduleType {
+	if -1 != scheduleType && 1 != scheduleType && 2 != scheduleType {
 		fmt.Println("scheduleType error,use -help to see how to use")
 		os.Exit(1)
 	}
@@ -206,6 +206,8 @@ func addJob(client *clientv3.Client, jobName string, cmd string, cron string, ex
 		ExecuteServers:     strings.Split(executeServers, ","),
 		ScheduleType:       scheduleType,
 		LastExecuteServers: []string{},
+		LastSuccessServers: []string{},
+		LastFailedServers:  []string{},
 		Status:             1,
 		ModifyTime:         time.Now(),
 	}

@@ -23,7 +23,11 @@ type Job struct {
 	LastExecuteStatus string `json:"lastExecuteStatus"`
 	// 上次执行机器ip
 	LastExecuteServers []string `json:"lastExecuteServers"`
-	// 状态：0 - 冻结，1 - 正常, 2 - 已调度，3 - 执行中
+	// 上次执行成功机器ip
+	LastSuccessServers []string `json:"lastSuccessServers"`
+	// 上次执行失败机器ip
+	LastFailedServers []string `json:"lastFailedServers"`
+	// 状态：0 - 冻结，1 - 正常, 2 - 执行中
 	Status int `json:"status"`
 	// 创建/修改时间
 	ModifyTime time.Time `json:"modifyTime"`

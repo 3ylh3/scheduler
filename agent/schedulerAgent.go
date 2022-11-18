@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"github.com/coreos/etcd/clientv3"
+	"github.com/coreos/etcd/clientv3/concurrency"
 	"log"
 	"net"
 	"os"
@@ -80,58 +81,73 @@ func main() {
 		}
 	}()
 	// watch jobs节点
+	session, err := concurrency.NewSession(client, concurrency.WithTTL(1))
+	if err != nil {
+		fmt.Printf("%s:create session error:%v\n", time.Now(), err)
+		return
+	}
+	defer session.Close()
 	ch := client.Watch(context.TODO(), "/agents/"+ip+"/jobs", clientv3.WithPrefix())
 	for res := range ch {
-		// 只处理put事件
-		if 0 == res.Events[0].Type {
-			job := common.Job{}
-			err := json.Unmarshal(res.Events[0].Kv.Value, &job)
-			if err != nil {
-				fmt.Printf("%s:parse job error:%v\n", time.Now(), err)
-				continue
-			}
-			// 执行cmd
-			cmd := exec.Command("/bin/bash", "-c", job.Cmd)
-			out, err := cmd.CombinedOutput()
-			if err != nil {
-				fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
-				// TODO 更新任务上次执行状态为失败
-				continue
-			}
+		go func(event *clientv3.Event) {
+			// 只处理put事件
+			if 0 == event.Type {
+				job := common.Job{}
+				err := json.Unmarshal(event.Kv.Value, &job)
+				if err != nil {
+					fmt.Printf("%s:parse job error:%v\n", time.Now(), err)
+					return
+				}
+				defer func() {
+					// 删除/agents/ip/jobs节点下job内容
+					_, err = kv.Delete(context.TODO(), "/agents/"+ip+"/jobs/"+job.Name)
+				}()
+				// 执行cmd
+				success := true
+				cmd := exec.Command("/bin/bash", "-c", job.Cmd)
+				out, err := cmd.CombinedOutput()
+				if err != nil {
+					// 执行失败
+					success = false
+					fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
+				}
+				// 获取/jobs/${jobName}/execute节点内容
+				// 加分布式锁
+				lock := concurrency.NewLocker(session, "/jobs/"+job.Name+"/execute")
+				lock.Lock()
+				defer lock.Unlock()
+				resp, err := kv.Get(context.TODO(), "/jobs/"+job.Name+"/execute")
+				if err != nil {
+					fmt.Printf("%s:update execute result error:%v,job name:%s\n", time.Now(), err, job.Name)
+					return
+				}
+				execute := common.Execute{}
+				err = json.Unmarshal(resp.Kvs[0].Value, &execute)
+				if err != nil {
+					fmt.Printf("%s:update execute result error:%v,job name:%s\n", time.Now(), err, job.Name)
+					return
+				}
+				fmt.Printf("%s:execute %s output:\n%s", time.Now(), job.Name, string(out))
 
-			fmt.Printf("%s:%s\n", time.Now(), string(out))
-
-			// 更新任务状态为1
-			resp, err := kv.Get(context.TODO(), "/jobs/"+job.Name)
-			if err != nil {
-				fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
-				continue
+				if success {
+					// 更新/jobs/${jobName}/execute节点下SuccessServers信息
+					execute.SuccessServers = append(execute.SuccessServers, ip)
+				} else {
+					// 更新/jobs/${jobName}/execute节点下FailedServers信息
+					execute.FailedServers = append(execute.FailedServers, ip)
+				}
+				executeDetail, err := json.Marshal(execute)
+				if err != nil {
+					fmt.Printf("%s:update execute result error:%v,job name:%s\n", time.Now(), err, job.Name)
+					return
+				}
+				_, err = kv.Put(context.TODO(), "/jobs/"+job.Name+"/execute", string(executeDetail))
+				if err != nil {
+					fmt.Printf("%s:update execute result error:%v,job name:%s\n", time.Now(), err, job.Name)
+					return
+				}
+				fmt.Printf("%s:job execute completed,job name:%s\n", time.Now(), job.Name)
 			}
-			tmp := common.Job{}
-			err = json.Unmarshal(resp.Kvs[0].Value, &tmp)
-			if err != nil {
-				fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
-				continue
-			}
-			tmp.Status = 1
-			bytes, err := json.Marshal(tmp)
-			if err != nil {
-				fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
-				continue
-			}
-			jobDetail := string(bytes)
-			// 更新etcd内容
-			_, err = kv.Put(context.TODO(), "/jobs/"+tmp.Name, jobDetail, clientv3.WithPrevKV())
-			if err != nil {
-				fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
-				continue
-			}
-
-			// 删除/agents/ip/jobs节点下job内容
-			_, err = kv.Delete(context.TODO(), "/agents/"+ip+"/jobs/"+job.Name)
-			if err != nil {
-				fmt.Printf("%s:execute job error:%v,job name:%s\n", time.Now, err, job.Name)
-			}
-		}
+		}(res.Events[0])
 	}
 }
