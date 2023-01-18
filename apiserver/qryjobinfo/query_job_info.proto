@@ -1,0 +1,21 @@
+syntax = "proto3";
+
+package qryjobinfo;
+option go_package = "github.com/3ylh3/scheduler/apiserver/qryjobinfo;qryjobinfo";
+
+import "apiserver/job/job_info.proto";
+
+service QueryJobInfo {
+  rpc QueryJobInfo(QueryJobInfoRequest) returns (QueryJobInfoResponse) {}
+}
+
+message QueryJobInfoRequest {
+  // 任务id，-1代表查询所有
+  string job_id = 1;
+  // 任务名称
+  string job_name = 2;
+}
+
+message QueryJobInfoResponse {
+  repeated job.JobInfo result = 1;
+}

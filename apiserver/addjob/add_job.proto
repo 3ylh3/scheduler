@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package addjob;
+option go_package = "github.com/3ylh3/scheduler/apiserver/addjob;addjob";
+
+import "apiserver/job/job_info.proto";
+
+service AddJob {
+  rpc AddJob(AddJobRequest) returns (job.JobInfo) {}
+}
+
+message AddJobRequest {
+  string job_name = 1;
+  string cmd = 2;
+  string cron = 3;
+  string execute_servers = 4;
+  int32 schedule_type = 5;
+}

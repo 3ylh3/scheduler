@@ -1,0 +1,35 @@
+syntax = "proto3";
+
+package job;
+option go_package = "github.com/3ylh3/scheduler/apiserver/job;job";
+
+message JobInfo {
+  // 任务id
+  int64 id = 1;
+  // 任务名
+  string name = 2;
+  // 任务执行命令
+  string cmd = 3;
+  // cron表达式
+  string cron = 4;
+  // 执行机
+  repeated string execute_servers = 5;
+  // 调度类型：1 - 全量调度，2 - 单机调度
+  int32 schedule_type = 6;
+  // 下次执行时间
+  int64 next_execute_time = 7;
+  // 上次执行时间
+  string last_execute_time = 8;
+  // 上次执行状态
+  string last_execute_status = 9;
+  // 上次执行机器ip
+  repeated string last_execute_servers = 10;
+  // 上次执行成功机器ip
+  repeated string last_success_servers = 11;
+  // 上次执行失败机器ip
+  repeated string last_failed_servers = 12;
+  // 状态：0 - 冻结，1 - 正常, 2 - 执行中，3 - 异常
+  int32 status = 13;
+  // 创建/修改时间
+  string modify_time = 14;
+}

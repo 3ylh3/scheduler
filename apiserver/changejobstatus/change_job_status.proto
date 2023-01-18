@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package changejobstatus;
+option go_package = "github.com/3ylh3/scheduler/apiserver/changejobstatus;changejobstatus";
+
+import "google/protobuf/empty.proto";
+
+service ChangeJobStatus {
+  rpc ChangeJobStatus(ChangeJobStatusRequest) returns(google.protobuf.Empty);
+}
+
+message ChangeJobStatusRequest {
+  string job_id = 1;
+  int32 status = 2;
+}

@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package deletejob;
+option go_package = "github.com/3ylh3/scheduler/apiserver/deletejob;deletejob";
+
+import "google/protobuf/empty.proto";
+
+service DeleteJob {
+  rpc DeleteJob(DeleteJobRequest) returns(google.protobuf.Empty) {}
+}
+
+message DeleteJobRequest {
+  string job_id = 1;
+}

@@ -1,0 +1,18 @@
+syntax = "proto3";
+
+package updatejob;
+option go_package = "github.com/3ylh3/scheduler/apiserver/updatejob;updatejob";
+
+import "apiserver/job/job_info.proto";
+
+service UpdateJob {
+  rpc UpdateJob(UpdateJobRequest) returns (job.JobInfo);
+}
+
+message UpdateJobRequest {
+  string job_id = 1;
+  string cmd = 2;
+  string cron = 3;
+  string executeServers = 4;
+  int32 scheduleType = 5;
+}
