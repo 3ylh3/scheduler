@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -9,15 +10,19 @@ import (
 	"github.com/3ylh3/scheduler/apiserver/changejobstatus"
 	"github.com/3ylh3/scheduler/apiserver/deletejob"
 	"github.com/3ylh3/scheduler/apiserver/job"
+	"github.com/3ylh3/scheduler/apiserver/qryexerec"
 	"github.com/3ylh3/scheduler/apiserver/qryjobinfo"
 	"github.com/3ylh3/scheduler/apiserver/updatejob"
 	"github.com/3ylh3/scheduler/common"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang/protobuf/jsonpb"
 	"github.com/gorhill/cronexpr"
 	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
 	"google.golang.org/grpc"
 	"google.golang.org/protobuf/types/known/emptypb"
+	"gopkg.in/yaml.v3"
+	"io/ioutil"
 	"net"
 	"os"
 	"strconv"
@@ -26,37 +31,61 @@ import (
 )
 
 func main() {
-	// help
-	var help bool
-	// etcd地址
-	var etcdAddr string
-	// 端口
-	var port int
-	flag.BoolVar(&help, "help", false, "show help")
-	flag.StringVar(&etcdAddr, "etcdAddr", "", "etcd address")
-	flag.IntVar(&port, "port", 4000, "apiserver port,default 4000")
+	// 配置文件
+	var conf string
+	flag.StringVar(&conf, "conf", "./config.yaml", "config file,default:./config.yaml")
 	flag.Parse()
-	if help {
-		// 打印使用信息
-		flag.PrintDefaults()
-		return
-	}
-	// 校验参数
-	if etcdAddr == "" {
-		fmt.Println("etcd address is null,use -help to see how to use")
+	if "" == conf {
+		fmt.Println("config file can not be empty,use -conf to declare")
 		os.Exit(1)
 	}
-	lis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+	// 解析配置文件
+	file, err := ioutil.ReadFile(conf)
+	if err != nil {
+		fmt.Printf("read config file error:%v\n", err)
+		os.Exit(1)
+	}
+	c := common.Config{}
+	err = yaml.Unmarshal(file, &c)
+	if err != nil {
+		fmt.Printf("parse config file error:%v\n", err)
+		os.Exit(1)
+	}
+	// 校验参数
+	if c.Etcd.Address == "" {
+		fmt.Println("etcd address is null")
+		os.Exit(1)
+	}
+	if c.Port == 0 {
+		c.Port = 4000
+	}
+	lis, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", c.Port))
 	if err != nil {
 		fmt.Printf("failed to listen: %v\n", err)
 		os.Exit(1)
 	}
+	// 初始化mysql连接
+	db, err := sql.Open("mysql", c.Mysql.User+":"+c.Mysql.Password+"@tcp("+
+		c.Mysql.Host+":"+strconv.Itoa(c.Mysql.Port)+")/"+c.Mysql.Database)
+	if nil != err {
+		fmt.Printf("connect to mysql error:%v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	// 设置连接池参数
+	// 最大空闲连接数
+	db.SetMaxIdleConns(10)
+	// 最大连接数
+	db.SetMaxOpenConns(100)
+	// 设置连接最大复用时间
+	db.SetConnMaxLifetime(time.Hour * 1)
 	grpcServer := grpc.NewServer()
-	qryjobinfo.RegisterQueryJobInfoServer(grpcServer, &QueryJobInfoServer{EtcdAddr: etcdAddr})
-	addjob.RegisterAddJobServer(grpcServer, &AddJobServer{EtcdAddr: etcdAddr})
-	updatejob.RegisterUpdateJobServer(grpcServer, &UpdateJobServer{EtcdAddr: etcdAddr})
-	deletejob.RegisterDeleteJobServer(grpcServer, &DeleteJobServer{EtcdAddr: etcdAddr})
-	changejobstatus.RegisterChangeJobStatusServer(grpcServer, &ChangeJobStatusServer{EtcdAddr: etcdAddr})
+	qryjobinfo.RegisterQueryJobInfoServer(grpcServer, &QueryJobInfoServer{EtcdAddr: c.Etcd.Address})
+	addjob.RegisterAddJobServer(grpcServer, &AddJobServer{EtcdAddr: c.Etcd.Address})
+	updatejob.RegisterUpdateJobServer(grpcServer, &UpdateJobServer{EtcdAddr: c.Etcd.Address})
+	deletejob.RegisterDeleteJobServer(grpcServer, &DeleteJobServer{EtcdAddr: c.Etcd.Address})
+	changejobstatus.RegisterChangeJobStatusServer(grpcServer, &ChangeJobStatusServer{EtcdAddr: c.Etcd.Address})
+	qryexerec.RegisterQueryExecutionRecordServer(grpcServer, &QueryExecutionRecordServer{Db: db})
 	fmt.Printf("apiserver apiserver is listing at %v\n", lis.Addr())
 	err = grpcServer.Serve(lis)
 	if err != nil {
@@ -89,6 +118,11 @@ type ChangeJobStatusServer struct {
 	EtcdAddr string
 }
 
+type QueryExecutionRecordServer struct {
+	qryexerec.UnimplementedQueryExecutionRecordServer
+	Db *sql.DB
+}
+
 // 初始化etcd client
 func initEtcdClient(etcdAddr string) (*clientv3.Client, error) {
 	var config = clientv3.Config{
@@ -98,7 +132,7 @@ func initEtcdClient(etcdAddr string) (*clientv3.Client, error) {
 	return clientv3.New(config)
 }
 
-// 查询job信息
+// QueryJobInfo 查询job信息
 func (q *QueryJobInfoServer) QueryJobInfo(ctx context.Context, req *qryjobinfo.QueryJobInfoRequest) (*qryjobinfo.QueryJobInfoResponse, error) {
 	//初始化etcd client
 	client, err := initEtcdClient(q.EtcdAddr)
@@ -174,7 +208,7 @@ func (q *QueryJobInfoServer) QueryJobInfo(ctx context.Context, req *qryjobinfo.Q
 	return &qryjobinfo.QueryJobInfoResponse{Result: result}, nil
 }
 
-// 新增job
+// AddJob 新增job
 func (a *AddJobServer) AddJob(ctx context.Context, req *addjob.AddJobRequest) (*job.JobInfo, error) {
 	//初始化etcd client
 	client, err := initEtcdClient(a.EtcdAddr)
@@ -285,7 +319,7 @@ func generateJobId(client *clientv3.Client, session *concurrency.Session) (int, 
 	return id, nil
 }
 
-// 更新job信息
+// UpdateJob 更新job信息
 func (u *UpdateJobServer) UpdateJob(ctx context.Context, req *updatejob.UpdateJobRequest) (*job.JobInfo, error) {
 	//初始化etcd client
 	client, err := initEtcdClient(u.EtcdAddr)
@@ -486,4 +520,43 @@ func (c *ChangeJobStatusServer) ChangeJobStatus(ctx context.Context, req *change
 		return &emptypb.Empty{}, err
 	}
 	return &emptypb.Empty{}, nil
+}
+
+// QueryExecutionRecord 查询执行记录
+func (q *QueryExecutionRecordServer) QueryExecutionRecord(ctx context.Context, req *qryexerec.QueryExecutionRecordRequest) (*qryexerec.QueryExecutionRecordResponse, error) {
+	stmt, err := q.Db.Prepare("select job_id,job_name,execute_servers,success_servers,failed_servers,execute_status," +
+		"executed_time from execution_record where (? = -1 or job_id = ?) and (? = '' or job_name = ?)" +
+		"and (? = '' or execute_servers like concat('%', ?, '%')) and (? = '' or execute_status = ?)" +
+		"and (? = '' or executed_time >= ?) and (? = '' or executed_time <= ?)")
+	if err != nil {
+		fmt.Printf("query execution record error:%v\n", err)
+		return &qryexerec.QueryExecutionRecordResponse{}, err
+	}
+	defer stmt.Close()
+	rows, err := stmt.Query(req.JobId, req.JobId, req.JobName, req.JobName,
+		req.ExecuteServer, req.ExecuteServer, req.ExecuteStatus, req.ExecuteStatus, req.StartTime, req.StartTime,
+		req.EndTime, req.EndTime)
+	if err != nil {
+		fmt.Printf("query execution record error:%v\n", err)
+		return &qryexerec.QueryExecutionRecordResponse{}, err
+	}
+	defer rows.Close()
+	rsp := &qryexerec.QueryExecutionRecordResponse{}
+	var result []*qryexerec.ExecutionRecord
+	for rows.Next() {
+		record := &qryexerec.ExecutionRecord{}
+		err := rows.Scan(&record.JobId, &record.JobName, &record.ExecuteServers, &record.SuccessServers, &record.FailedServers,
+			&record.ExecuteStatus, &record.ExecutedTime)
+		if err != nil {
+			fmt.Printf("query execution record error:%v\n", err)
+			return &qryexerec.QueryExecutionRecordResponse{}, err
+		}
+		result = append(result, record)
+	}
+	err = rows.Err()
+	if err != nil {
+		return &qryexerec.QueryExecutionRecordResponse{}, err
+	}
+	rsp.Result = result
+	return rsp, nil
 }

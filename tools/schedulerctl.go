@@ -8,6 +8,7 @@ import (
 	"github.com/3ylh3/scheduler/apiserver/addjob"
 	"github.com/3ylh3/scheduler/apiserver/changejobstatus"
 	"github.com/3ylh3/scheduler/apiserver/deletejob"
+	"github.com/3ylh3/scheduler/apiserver/qryexerec"
 	"github.com/3ylh3/scheduler/apiserver/qryjobinfo"
 	"github.com/3ylh3/scheduler/apiserver/updatejob"
 	"github.com/golang/protobuf/jsonpb"
@@ -34,12 +35,21 @@ func main() {
 	var scheduleType int
 	// apiServer地址
 	var apiServerAddr string
+	// 查询执行机条件
+	var executeServer string
+	// 执行状态
+	var executeStatus string
+	// 查询起始时间
+	var startTime string
+	// 查询结束时间
+	var endTime string
 	var add bool
 	var show bool
 	var update bool
 	var del bool
 	var freeze bool
 	var unfreeze bool
+	var queryExecutionRecord bool
 	flag.BoolVar(&help, "help", false, "show help")
 	flag.IntVar(&jobId, "jobId", -1, "job id")
 	flag.StringVar(&jobName, "jobName", "", "job name")
@@ -48,19 +58,24 @@ func main() {
 	flag.StringVar(&executeServers, "executeServers", "", "execute apiserver")
 	flag.IntVar(&scheduleType, "scheduleType", -1, "schedule type,default 1\n1:execute at all apiserver\n0:execute at one queryJobInfoServer")
 	flag.StringVar(&apiServerAddr, "apiServerAddr", "", "apiserver apiserver address")
+	flag.StringVar(&executeServer, "executeServer", "", "query execution records condition:execute server")
+	flag.StringVar(&executeStatus, "executeStatus", "", "query execution records condition:execute status")
+	flag.StringVar(&startTime, "startTime", "", "query execution records condition:start time")
+	flag.StringVar(&endTime, "endTime", "", "query execution records condition:end time")
 	flag.BoolVar(&add, "add", false, "")
 	flag.BoolVar(&show, "show", false, "")
 	flag.BoolVar(&update, "update", false, "")
 	flag.BoolVar(&del, "delete", false, "")
 	flag.BoolVar(&freeze, "freeze", false, "")
 	flag.BoolVar(&unfreeze, "unfreeze", false, "")
+	flag.BoolVar(&queryExecutionRecord, "queryExecutionRecord", false, "")
 	flag.Parse()
 	if help {
 		// 打印使用信息
 		printHelp()
 		return
 	}
-	if !add && !show && !update && !del && !freeze && !unfreeze {
+	if !add && !show && !update && !del && !freeze && !unfreeze && !queryExecutionRecord {
 		fmt.Println("please select one option,use -help to see how to use")
 		os.Exit(1)
 	}
@@ -127,6 +142,15 @@ func main() {
 		// 冻结任务
 		changeJobStatus(apiServerAddr, jobId, 1)
 	}
+	if queryExecutionRecord {
+		// 校验参数
+		if "" == apiServerAddr {
+			fmt.Println("param error,use -help to see how to use")
+			os.Exit(1)
+		}
+		// 查询执行记录
+		queryRecord(apiServerAddr, jobId, jobName, executeServer, executeStatus, startTime, endTime)
+	}
 }
 
 // 打印使用信息
@@ -139,6 +163,7 @@ func printHelp() {
 	fmt.Printf("  -delete\t\t\t\t\tdelete job,jobId and etcdAddr is needed\n")
 	fmt.Printf("  -freeze\t\t\t\t\tfreeze job,jobId and etcdAddr is needed\n")
 	fmt.Printf("  -unfreeze\t\t\t\t\tunfreeze job,jobId and etcdAddr is needed\n")
+	fmt.Printf("  -queryExecutionRecord\t\t\t\tquery execution record\n")
 	fmt.Println("Params:")
 	fmt.Printf("  -jobId\t\t\t\t\tjob id\n")
 	fmt.Printf("  -jobName\t\t\t\t\tjob name\n")
@@ -146,7 +171,7 @@ func printHelp() {
 	fmt.Printf("  -cron\t\t\t\t\t\tcron expression\n")
 	fmt.Printf("  -executeServers\t\t\t\texecute apiserver\n")
 	fmt.Printf("  -scheduleType\t\t\t\t\tschedule type,default 1\n\t\t\t\t\t\t1:execute at all apiserver\n\t\t\t\t\t\t0:execute at one queryJobInfoServer\n")
-	fmt.Printf("  -apiServerAddr\t\t\t\t\tapiserver apiserver address\n")
+	fmt.Printf("  -apiServerAddr\t\t\t\tapiserver apiserver address\n")
 }
 
 func showJob(apiServerAddr string, jobName string, jobId int) {
@@ -301,4 +326,41 @@ func changeJobStatus(apiServerAddr string, jobId int, status int) {
 		os.Exit(1)
 	}
 	fmt.Println("change job status success")
+}
+
+// 查询执行记录
+func queryRecord(apiServerAddr string, jobId int, jobName string, executeServer string, executeStatus string, startTime string, endTime string) {
+	// 调用api server查询执行记录
+	req := qryexerec.QueryExecutionRecordRequest{
+		JobId:         int32(jobId),
+		JobName:       jobName,
+		ExecuteServer: executeServer,
+		ExecuteStatus: executeStatus,
+		StartTime:     startTime,
+		EndTime:       endTime,
+	}
+	conn, err := grpc.Dial(apiServerAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		fmt.Printf("connect to apiserver apiserver error:%v\n", err)
+		os.Exit(1)
+	}
+	defer conn.Close()
+	client := qryexerec.NewQueryExecutionRecordClient(conn)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	rsp, err := client.QueryExecutionRecord(ctx, &req)
+	if err != nil {
+		fmt.Printf("query execution record error:%v\n", err)
+		os.Exit(1)
+	}
+	jsonpbMarshaler := &jsonpb.Marshaler{
+		EmitDefaults: true, //将字段值为空的渲染到JSON结构中
+	}
+	var buffer bytes.Buffer
+	err = jsonpbMarshaler.Marshal(&buffer, rsp)
+	if err != nil {
+		fmt.Printf("parse execution record error:%v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println(buffer.String())
 }

@@ -3,31 +3,53 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"github.com/3ylh3/scheduler/common"
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/gorhill/cronexpr"
 	"go.etcd.io/etcd/api/v3/mvccpb"
 	"go.etcd.io/etcd/client/v3"
 	"go.etcd.io/etcd/client/v3/concurrency"
+	"gopkg.in/yaml.v3"
+	"io/ioutil"
 	"math/big"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
 func main() {
-	// etcd地址
-	var etcdAddr string
-	flag.StringVar(&etcdAddr, "etcdAddr", "", "etcd address")
+	// 配置文件
+	var conf string
+	flag.StringVar(&conf, "conf", "./config.yaml", "config file,default:./config.yaml")
 	flag.Parse()
-	if "" == etcdAddr {
-		fmt.Println("etcd address can not be empty,use -etcdAddr to declare")
+	if "" == conf {
+		fmt.Println("config file can not be empty,use -conf to declare")
 		os.Exit(1)
 	}
+	// 解析配置文件
+	file, err := ioutil.ReadFile(conf)
+	if err != nil {
+		fmt.Printf("read config file error:%v\n", err)
+		os.Exit(1)
+	}
+	c := common.Config{}
+	err = yaml.Unmarshal(file, &c)
+	if err != nil {
+		fmt.Printf("parse config file error:%v\n", err)
+		os.Exit(1)
+	}
+	if "" == c.Etcd.Address {
+		fmt.Println("etcd address can not be empty")
+		os.Exit(1)
+	}
+	// 初始化etcd客户端
 	var config = clientv3.Config{
-		Endpoints:   []string{etcdAddr},
+		Endpoints:   []string{c.Etcd.Address},
 		DialTimeout: 5 * time.Second,
 	}
 	client, err := clientv3.New(config)
@@ -37,10 +59,25 @@ func main() {
 	}
 	defer client.Close()
 	kv := clientv3.NewKV(client)
+	// 初始化mysql连接
+	db, err := sql.Open("mysql", c.Mysql.User+":"+c.Mysql.Password+"@tcp("+
+		c.Mysql.Host+":"+strconv.Itoa(c.Mysql.Port)+")/"+c.Mysql.Database)
+	if nil != err {
+		fmt.Printf("connect to mysql error:%v\n", err)
+		os.Exit(1)
+	}
+	defer db.Close()
+	// 设置连接池参数
+	// 最大空闲连接数
+	db.SetMaxIdleConns(10)
+	// 最大连接数
+	db.SetMaxOpenConns(100)
+	// 设置连接最大复用时间
+	db.SetConnMaxLifetime(time.Hour * 1)
 	// 定时每小时检查是否有异常状态的任务
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	go checkJobs(ticker, client)
+	go checkJobs(ticker, client, db)
 	// 无限循环获取etcd中的job信息，若达到触发时间则挂到etcd对应的agent节点下
 	for {
 		resp, err := kv.Get(context.TODO(), "/jobs/", clientv3.WithPrefix())
@@ -65,7 +102,7 @@ func main() {
 				// 任务已冻结、异常或者正在执行中
 				continue
 			}
-			go processJob(job.Name, client, kv)
+			go processJob(job.Name, client, kv, db)
 		}
 		// sleep 200毫秒，减少cpu压力
 		time.Sleep(200 * time.Millisecond)
@@ -73,14 +110,14 @@ func main() {
 }
 
 // 检查是否有异常状态的任务
-func checkJobs(ticker *time.Ticker, client *clientv3.Client) {
+func checkJobs(ticker *time.Ticker, client *clientv3.Client, db *sql.DB) {
 	for {
 		<-ticker.C
-		doCheckJobs(client)
+		doCheckJobs(client, db)
 	}
 }
 
-func doCheckJobs(client *clientv3.Client) {
+func doCheckJobs(client *clientv3.Client, db *sql.DB) {
 	kv := clientv3.NewKV(client)
 	resp, err := kv.Get(context.TODO(), "/jobs/", clientv3.WithPrefix())
 	if err != nil {
@@ -104,7 +141,7 @@ func doCheckJobs(client *clientv3.Client) {
 		// 检查是否有正在执行但是agent异常的任务
 		checkAgent(&job, client)
 		// 检查是否有执行完成但是server异常未及时更新状态的任务
-		checkServer(&job, client)
+		checkServer(&job, client, db)
 	}
 }
 
@@ -154,14 +191,14 @@ func checkAgent(job *common.Job, client *clientv3.Client) {
 }
 
 // 检查是否有执行完成但是server异常未及时更新状态的任务
-func checkServer(job *common.Job, client *clientv3.Client) {
+func checkServer(job *common.Job, client *clientv3.Client, db *sql.DB) {
 	// 获取/jobs/${jobName}/execute节点数据
 	kv := clientv3.NewKV(client)
 	rsp, err := kv.Get(context.TODO(), "/jobs/"+job.Name+"/execute")
 	if err != nil {
 		return
 	}
-	// 检查是否所有agent上的任务执行情况
+	// 检查所有agent上的任务执行情况
 	execute := common.Execute{}
 	err = json.Unmarshal(rsp.Kvs[0].Value, &execute)
 	if err != nil {
@@ -188,12 +225,12 @@ func checkServer(job *common.Job, client *clientv3.Client) {
 			}
 			timestamp := expr.Next(time.Now()).Unix() * 1000
 			job.NextExecuteTime = timestamp
-			postProcess(job, client, &execute)
+			postProcess(job, client, &execute, db)
 		}
 	}
 }
 
-func processJob(jobName string, client *clientv3.Client, kv clientv3.KV) {
+func processJob(jobName string, client *clientv3.Client, kv clientv3.KV, db *sql.DB) {
 	// 初步判断是否有锁节点，有锁节点则直接退出，避免锁节点过多
 	resp, err := kv.Get(context.TODO(), "/jobs/"+jobName+"/", clientv3.WithPrefix())
 	if err != nil {
@@ -295,7 +332,7 @@ func processJob(jobName string, client *clientv3.Client, kv clientv3.KV) {
 			return
 		}
 		// 监听任务执行情况
-		go watchStatus(job, executingIps, client)
+		go watchStatus(job, executingIps, client, db)
 		for _, ip := range executingIps {
 			// 将任务信息挂在执行ip节点下
 			scheduledTime = time.Now()
@@ -334,7 +371,7 @@ func processJob(jobName string, client *clientv3.Client, kv clientv3.KV) {
 }
 
 // 监听任务执行状态
-func watchStatus(job common.Job, executingIps []string, client *clientv3.Client) {
+func watchStatus(job common.Job, executingIps []string, client *clientv3.Client, db *sql.DB) {
 	// watch /jobs/${jobName}/execute节点
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -380,11 +417,11 @@ func watchStatus(job common.Job, executingIps []string, client *clientv3.Client)
 		}
 	}
 	// 任务执行后处理
-	postProcess(&job, client, &execute)
+	postProcess(&job, client, &execute, db)
 	return
 }
 
-func postProcess(job *common.Job, client *clientv3.Client, execute *common.Execute) {
+func postProcess(job *common.Job, client *clientv3.Client, execute *common.Execute, db *sql.DB) {
 	// 删除/jobs/${jobName}/execute节点
 	kv := clientv3.NewKV(client)
 	_, err := kv.Delete(context.TODO(), "/jobs/"+job.Name+"/execute")
@@ -392,7 +429,8 @@ func postProcess(job *common.Job, client *clientv3.Client, execute *common.Execu
 		fmt.Printf("%s:updatejob job status error:%v,job name:%s\n", time.Now(), err, job.Name)
 		return
 	}
-	// TODO 记录执行记录
+	// 异步记录执行记录
+	go saveExecutionRecord(job, execute, db)
 	// 加分布式锁
 	session, err := concurrency.NewSession(client, concurrency.WithTTL(1))
 	if err != nil {
@@ -417,4 +455,20 @@ func postProcess(job *common.Job, client *clientv3.Client, execute *common.Execu
 	}
 	fmt.Printf("%s:job execute in %s %s at %s,job name:%s\n", time.Now(), job.LastExecuteServers,
 		job.LastExecuteStatus, time.Unix(execute.ExecutedTime, 0), job.Name)
+}
+
+// 记录执行记录
+func saveExecutionRecord(job *common.Job, execute *common.Execute, db *sql.DB) {
+	stmt, err := db.Prepare("insert into execution_record (job_id, job_name, execute_servers, success_servers, failed_servers, execute_status, executed_time) values (?, ?, ?, ?, ?, ?, ?)")
+	if err != nil {
+		fmt.Printf("save execution record error:%v\n", err)
+		return
+	}
+	tm := time.Unix(execute.ExecutedTime, 0)
+	_, err = stmt.Exec(job.Id, job.Name, strings.Join(execute.TotalServers, ","), strings.Join(execute.SuccessServers, ","),
+		strings.Join(execute.FailedServers, ","), job.LastExecuteStatus, tm.Format("2006-01-02 15:04:05"))
+	if err != nil {
+		fmt.Printf("save execution record error:%v\n", err)
+		return
+	}
 }

@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package qryexerec;
+option go_package = "github.com/3ylh3/scheduler/apiserver/qryexerec;qryexerec";
+
+service QueryExecutionRecord {
+  rpc QueryExecutionRecord(QueryExecutionRecordRequest) returns (QueryExecutionRecordResponse) {}
+}
+
+message QueryExecutionRecordRequest {
+  int32 job_id = 1;
+  string job_name = 2;
+  string execute_server = 3;
+  string execute_status = 4;
+  string start_time = 5;
+  string end_time = 6;
+}
+
+message QueryExecutionRecordResponse {
+  repeated ExecutionRecord result = 1;
+}
+
+message ExecutionRecord {
+  int32 job_id = 1;
+  string job_name = 2;
+  string execute_servers = 3;
+  string success_servers = 4;
+  string failed_servers = 5;
+  string execute_status = 6;
+  string executed_time = 7;
+}
