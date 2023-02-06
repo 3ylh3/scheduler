@@ -75,7 +75,7 @@ func main() {
 	// 设置连接最大复用时间
 	db.SetConnMaxLifetime(time.Hour * 1)
 	// 定时每小时检查是否有异常状态的任务
-	ticker := time.NewTicker(1 * time.Minute)
+	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 	go checkJobs(ticker, client, db)
 	// 无限循环获取etcd中的job信息，若达到触发时间则挂到etcd对应的agent节点下
